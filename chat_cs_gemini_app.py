@@ -1,59 +1,54 @@
-
 import streamlit as st
 import pandas as pd
-from sentence_transformers import SentenceTransformer
-import faiss
-import numpy as np
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import google.generativeai as genai
 
-# CONFIGURAÇÕES
-genai.configure(api_key="SUA_CHAVE_GEMINI")
-
-# MODELO PARA EMBEDDINGS
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
-
-# TÍTULO
-st.set_page_config(page_title="Chat CS Inteligente", layout="wide")
+# Configurações da página
+st.set_page_config(page_title="Chat Inteligente sobre Clientes e Métricas de CS", layout="wide")
 st.title("🔍 Chat Inteligente sobre Clientes e Métricas de CS")
 
-# CARREGAR DADOS
-uploaded_file = st.file_uploader("📂 Envie sua planilha (CSV)", type="csv")
+# Conectar ao Google Sheets via Service Account (armazenado em st.secrets)
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+client = gspread.authorize(creds)
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.success("✅ Planilha carregada com sucesso!")
+# Ler dados da planilha
+sheet = client.open("clientes_mrr_emissoes").sheet1
+data = sheet.get_all_records()
+df = pd.DataFrame(data)
+
+# Exibir preview dos dados
+with st.expander("👁️ Visualizar primeiros registros da base"):
     st.dataframe(df.head())
 
-    # TRANSFORMAR EM TEXTO
-    textos = df.apply(lambda row: " | ".join([f"{col}: {row[col]}" for col in df.columns]), axis=1).tolist()
-    embeddings = embedder.encode(textos)
+# Campo de pergunta
+st.subheader("📨 Faça uma pergunta sobre os dados:")
+pergunta = st.text_area("Exemplo: Quais clientes mais emitiram documentos no mês passado?", height=100)
 
-    # INDEXAÇÃO COM FAISS
-    dim = embeddings[0].shape[0]
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings))
+# Configurar Gemini
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+model = genai.GenerativeModel("gemini-pro")
 
-    # CAIXA DE PERGUNTA
-    pergunta = st.text_area("🗣️ Pergunte algo sobre os dados:", height=100)
-    if st.button("Consultar IA") and pergunta:
-        with st.spinner("Consultando..."):
-            pergunta_emb = embedder.encode([pergunta])
-            _, indices = index.search(np.array(pergunta_emb), k=5)
-            trechos = [textos[i] for i in indices[0]]
+# Botão para consultar
+if st.button("💬 Consultar IA") and pergunta:
+    with st.spinner("Processando..."):
+        contexto = df.to_csv(index=False)
+        prompt = f"""
+Você é um analista de Customer Success. Abaixo estão os dados dos clientes da empresa no formato CSV:
 
-            contexto = "\n".join(trechos)
+{contexto[:20000]}  # Limitando para não estourar o contexto
 
-            prompt = f"""
-Você é um analista de Customer Success. Responda em português claro com base nos dados abaixo:
+Com base nesses dados, responda à pergunta abaixo de forma clara, objetiva e em português:
 
-{contexto}
-
-Pergunta: {pergunta}
+{pergunta}
 """
+        resposta = model.generate_content(prompt)
+        st.markdown("### 🤖 Resposta da IA:")
+        st.write(resposta.text)
 
-            try:
-                resposta = genai.GenerativeModel("gemini-pro").generate_content(prompt)
-                st.markdown("### 🤖 Resposta da IA:")
-                st.write(resposta.text)
-            except Exception as e:
-                st.error("Erro ao consultar o Gemini: " + str(e))
+# Gráfico opcional
+with st.expander("📊 Gráfico de exemplo (Top 10 por emissão)"):
+    if "cliente" in df.columns and "emissões" in df.columns:
+        df_top = df.sort_values(by="emissões", ascending=False).head(10)
+        st.bar_chart(df_top.set_index("cliente")["emissões"])
